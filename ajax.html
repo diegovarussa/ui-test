@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>UI-Tests</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bulma/0.7.1/css/bulma.min.css">
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></script>
+</head>
+<body>
+<section class="section">
+    <div class="container">
+        <h1 class="title">
+            Ajax Tests
+        </h1>
+
+        <div class="field">
+            <label class="label">Request Type</label>
+            <div class="control">
+                <div class="select">
+                    <select id="type">
+                        <option value="GET">GET</option>
+                        <option value="POST">POST</option>
+                        <option value="PATCH">PATCH</option>
+                        <option value="PUT">PUT</option>
+                        <option value="DELETE">DELETE</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <div class="field">
+            <label class="label">Data Format</label>
+            <div class="control">
+                <div class="select">
+                    <select id="format">
+                        <option value="raw">raw</option>
+                        <option value="form-data">form-data</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <div class="field">
+            <label class="label">URL</label>
+            <div class="control">
+                <input id="url" class="input" type="text" placeholder="http://site.com" value="">
+            </div>
+        </div>
+
+        <div class="field">
+            <label class="label">Data</label>
+            <div class="control">
+                <textarea id="data" class="textarea" placeholder="JSON Content"></textarea>
+            </div>
+        </div>
+
+        <div class="field">
+            <label class="label">Headers</label>
+            <div class="control">
+                <textarea id="headers" class="textarea" placeholder="JSON Headers"></textarea>
+            </div>
+        </div>
+
+        <div class="field is-grouped">
+            <div class="control">
+                <button class="button is-link" onclick="start();">Submit</button>
+            </div>
+        </div>
+
+        <pre id="content"></pre>
+    </div>
+</section>
+
+
+<script>
+    function start() {
+        let type = $('#type').val();
+        let url = $('#url').val();
+        let data = $('#data').val().trim();
+        if (data !== '') {
+            data = JSON.parse(data);
+        }
+        let format = $('#format').val();
+        let headers = $('#headers').val().trim();
+
+        let ajax = {
+            type: type,
+            url: url,
+            success: function (data) {
+                console.log(data);
+                $('#content').text(JSON.stringify(data, null, 4));
+            }
+        };
+
+        if (type === 'POST' || type === 'PATCH' || type === 'PUT') {
+            if (format === 'raw') {
+                ajax.data = JSON.stringify(data);
+            }
+            ajax.data = data;
+        }
+
+        if (headers !== '') {
+            ajax.headers = JSON.parse(headers);
+        }
+
+        $.ajax(ajax);
+    }
+</script>
+</body>
+</html>
