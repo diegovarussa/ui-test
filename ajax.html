@@ -92,11 +92,11 @@
             }
         };
 
+        ajax.data = data;
         if (type === 'POST' || type === 'PATCH' || type === 'PUT') {
             if (format === 'raw') {
                 ajax.data = JSON.stringify(data);
             }
-            ajax.data = data;
         }
 
         if (headers !== '') {
