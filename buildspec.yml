@@ -1,0 +1,23 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      docker: 18
+  pre_build:
+    commands:
+      - env
+      - $(aws ecr get-login --no-include-email --region $AWS_DEFAULT_REGION)
+      - docker pull $CONTAINER_REPOSITORY_URL || true
+  build:
+    commands:
+      - CONTAINER_FINAL_URL="$CONTAINER_REPOSITORY_URL:latest"
+      - echo $CONTAINER_FINAL_URL
+      - pwd
+      - docker build --cache-from $CONTAINER_REPOSITORY_URL --tag "$CONTAINER_FINAL_URL" -f Dockerfile .
+  post_build:
+    commands:
+      - docker push $CONTAINER_FINAL_URL
+      - printf '[{"name":"%s","imageUri":"%s"}]' "$CONTAINER_NAME" "$CONTAINER_FINAL_URL" > images.json
+artifacts:
+  files: images.json
