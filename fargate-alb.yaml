@@ -1,0 +1,398 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Fargate and ALB
+
+Parameters:
+  VpcId:
+    Type: String
+    Description: VPC ID
+    Default: "vpc-880389ec"
+  SubnetIds:
+    Type: CommaDelimitedList
+    Description: Subnets ID
+    Default: subnet-0894c67e, subnet-90ca2df5, subnet-ca930c92
+  OAuthToken:
+    Type: String
+    Description: Github token to use github repository
+    NoEcho: true
+
+Resources:
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref AWS::StackName
+      LifecyclePolicy:
+        RegistryId: !Ref AWS::AccountId
+        LifecyclePolicyText: >
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep only one image, expire all others",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 1
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+
+
+
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+      Policies:
+        - PolicyName: CodeBuildPolice
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AWS::StackName}*'
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AWSCodeBuildDeveloperAccess
+        - arn:aws:iam::aws:policy/IAMFullAccess
+        - arn:aws:iam::aws:policy/AmazonSNSFullAccess
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerServiceFullAccess
+      Policies:
+        - PolicyName: CodePipelinePolice
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}*'
+                Action:
+                  - cloudformation:*
+
+  CodeBuild:
+    Type: "AWS::CodeBuild::Project"
+    Properties:
+      TimeoutInMinutes: 60
+      Name: !Ref AWS::StackName
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Packaging: NONE
+        Type: CODEPIPELINE
+        Name: !Ref AWS::StackName
+      BadgeEnabled: false
+      Cache:
+        Type: NO_CACHE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        PrivilegedMode: true
+        Image: "aws/codebuild/standard:2.0"
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: CONTAINER_NAME
+            Type: PLAINTEXT
+            Value: !Ref EcrRepository
+          - Name: CONTAINER_REPOSITORY_URL
+            Type: PLAINTEXT
+            Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepository}"
+      Source:
+        Type: CODEPIPELINE
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+
+  CodePipeline:
+    Type: "AWS::CodePipeline::Pipeline"
+    DependsOn: Service
+    Properties:
+      Name: !Ref AWS::StackName
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      ArtifactStore:
+        Location: !Ref S3Bucket
+        Type: S3
+      Stages:
+        - Name: Source
+          Actions:
+            - InputArtifacts: []
+              Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: "1"
+                Provider: GitHub
+              OutputArtifacts:
+                - Name: SourceArtifact
+              Configuration:
+                Owner: "diegovarussa"
+                Repo: "ui-test"
+                PollForSourceChanges: false
+                Branch: "master"
+                OAuthToken: !Ref OAuthToken
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - InputArtifacts:
+                - Name: SourceArtifact
+              Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: "1"
+                Provider: CodeBuild
+              OutputArtifacts:
+                - Name: BuildArtifact
+              Configuration:
+                ProjectName: !Ref CodeBuild
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - InputArtifacts:
+                - Name: BuildArtifact
+              Name: Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: "1"
+                Provider: ECS
+              OutputArtifacts: []
+              Configuration:
+                ClusterName: !Ref EcsCluster
+                FileName: "images.json"
+                ServiceName: !Ref AWS::StackName
+              RunOrder: 2
+
+  PipelineWebhook:
+    Type: AWS::CodePipeline::Webhook
+    Properties:
+      Authentication: GITHUB_HMAC
+      AuthenticationConfiguration:
+        SecretToken: !Ref OAuthToken
+      Filters:
+        - JsonPath: "$.ref"
+          MatchEquals: refs/heads/{Branch}
+      TargetPipeline: !Ref CodePipeline
+      TargetAction: Source
+      Name: !Sub 'webhook-${AWS::StackName}'
+      TargetPipelineVersion: !GetAtt CodePipeline.Version
+      RegisterWithThirdParty: true
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+
+  Ec2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+
+  LoadBalancer:
+    Type: "AWS::ElasticLoadBalancingV2::LoadBalancer"
+    Properties:
+      Name: !Ref AWS::StackName
+      Scheme: "internet-facing"
+      Type: "application"
+      Subnets: !Ref SubnetIds
+      SecurityGroups:
+        -  !Ref Ec2SecurityGroup
+      IpAddressType: "ipv4"
+      LoadBalancerAttributes:
+        - Key: "access_logs.s3.enabled"
+          Value: "false"
+        - Key: "idle_timeout.timeout_seconds"
+          Value: "60"
+        - Key: "deletion_protection.enabled"
+          Value: "false"
+        - Key: "routing.http2.enabled"
+          Value: "true"
+        - Key: "routing.http.drop_invalid_header_fields.enabled"
+          Value: "false"
+
+  TargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: "/"
+      Port: 80
+      Protocol: "HTTP"
+      HealthCheckPort: "traffic-port"
+      HealthCheckProtocol: "HTTP"
+      HealthCheckTimeoutSeconds: 5
+      UnhealthyThresholdCount: 2
+      TargetType: "ip"
+      Matcher:
+        HttpCode: "200"
+      HealthyThresholdCount: 5
+      VpcId: !Ref VpcId
+      Name: !Ref AWS::StackName
+      HealthCheckEnabled: true
+      TargetGroupAttributes:
+        - Key: "stickiness.enabled"
+          Value: "false"
+        - Key: "deregistration_delay.timeout_seconds"
+          Value: "300"
+        - Key: "stickiness.type"
+          Value: "lb_cookie"
+        - Key: "stickiness.lb_cookie.duration_seconds"
+          Value: "86400"
+        - Key: "slow_start.duration_seconds"
+          Value: "0"
+        - Key: "load_balancing.algorithm.type"
+          Value: "round_robin"
+
+  Listener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: '80'
+      Protocol: HTTP
+
+  LoadBalancerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: 'forward'
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - "/"
+      ListenerArn: !Ref Listener
+      Priority: 1
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${AWS::StackName}"
+      RetentionInDays: 30
+
+  LogGroupCodeBuild:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/codebuild/${AWS::StackName}"
+      RetentionInDays: 30
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  EcsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+        - Name: !Ref AWS::StackName
+          Cpu: "0"
+          Environment:
+            - Name: SQS_URL
+              Value: "Some Parameter or Map"
+            - Name: SNS_TOPIC
+              Value: "Some Parameter or Map"
+          Essential: "true"
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${AWS::StackName}"
+          LogConfiguration:
+            LogDriver: "awslogs"
+            Options:
+              "awslogs-group": !Sub "/ecs/${AWS::StackName}"
+              "awslogs-region": !Ref AWS::Region
+              "awslogs-stream-prefix": "ecs"
+          MountPoints: []
+          PortMappings:
+            - ContainerPort: 80
+              HostPort: 80
+              Protocol: "tcp"
+          VolumesFrom: []
+      Cpu: "256"
+      ExecutionRoleArn: !GetAtt [ TaskExecutionRole, Arn ]
+      Family: !Ref AWS::StackName
+      Memory: "512"
+      NetworkMode: "awsvpc"
+      PlacementConstraints: []
+      RequiresCompatibilities:
+        - "FARGATE"
+      TaskRoleArn: !GetAtt [ TaskExecutionRole, Arn ]
+      Volumes: []
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: Listener
+    Properties:
+      Cluster: !Ref EcsCluster
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      DesiredCount: 0
+      LaunchType: "FARGATE"
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: "ENABLED"
+          SecurityGroups:
+            - !Ref Ec2SecurityGroup
+          Subnets: !Ref SubnetIds
+      LoadBalancers:
+        - ContainerPort: "80"
+          ContainerName: !Ref AWS::StackName
+          TargetGroupArn: !Ref TargetGroup
+      PlacementConstraints: []
+      PlacementStrategies: []
+      PlatformVersion: "LATEST"
+      SchedulingStrategy: "REPLICA"
+      ServiceName: !Ref AWS::StackName
+      ServiceRegistries: []
+      TaskDefinition: !Ref EcsTaskDefinition
+
+Outputs:
+  LoadBalancerDNS:
+    Value: !GetAtt LoadBalancer.DNSName
